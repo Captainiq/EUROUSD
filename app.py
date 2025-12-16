@@ -1,10 +1,11 @@
 import streamlit as st
 from fredapi import Fred
 import pandas as pd
+import datetime
 
 # --- 1. CONFIGURATION ---
-# ⚠️ PASTE YOUR API KEY HERE
-API_KEY = 'e9c0ff93e863850792b45ad43f8fbf0e' 
+# ⚠️ PASTE YOUR API KEY INSIDE THE QUOTES BELOW
+API_KEY = 'e9c0ff93e863850792b45ad43f8fbf0e'
 
 st.set_page_config(page_title="EUR/USD Fundamental Command Center", page_icon="💶", layout="wide")
 
@@ -17,162 +18,159 @@ except:
 
 # --- 3. HELPER FUNCTIONS ---
 def get_latest(series_id):
-    """Fetches the absolute latest value."""
+    """Fetches the absolute latest daily value."""
     try:
         data = fred.get_series(series_id)
-        return data.iloc[-1]
+        return data.iloc[-1], data.index[-1]
     except:
-        return None
+        return None, None
 
-def get_mom_change(series_id):
-    """Calculates Month-over-Month % Change (for Retail, Earnings)."""
+def get_yoy_growth(series_id, is_quarterly=False):
+    """Calculates Year-over-Year growth %."""
     try:
         data = fred.get_series(series_id)
-        current = data.iloc[-1]
-        prev = data.iloc[-2]
+        if is_quarterly:
+            current = data.iloc[-1]
+            prev = data.iloc[-5] # Compare to 4 quarters ago
+        else:
+            current = data.iloc[-1]
+            prev = data.iloc[-13] # Compare to 12 months ago
+        
         return ((current - prev) / prev) * 100
     except:
         return None
 
-def get_change_value(series_id):
-    """Calculates absolute change (for NFP Jobs added)."""
-    try:
-        data = fred.get_series(series_id)
-        return data.iloc[-1] - data.iloc[-2]
-    except:
-        return None
-
 # --- 4. FETCH DATA (THE ENGINE) ---
-with st.spinner('Fetching live economic data...'):
+with st.spinner('Fetching live economic data and market expectations...'):
     
-    # 1. GERMAN MANUFACTURING HEALTH (Proxy for Flash PMI)
-    # Series: Production of Total Industry in Germany (DEUPROINDMISMEI)
-    # Logic: Rising = Bullish EUR
-    ger_manuf = get_mom_change('DEUPROINDMISMEI')
+    # A. INTEREST RATES (FIXED: Uses Daily Target)
+    # US: Target Range Upper Limit (DFEDTARU) - Captures cuts instantly
+    us_rate, us_date = get_latest('DFEDTARU') 
+    if us_rate is None: us_rate, _ = get_latest('DFF') # Backup: Effective Rate
+        
+    eu_rate, _ = get_latest('ECBDFR')   # ECB Deposit Facility Rate
+    if eu_rate is None: eu_rate = 3.25 # Manual Fallback if API glitch
 
-    # 2. WEEKLY EMPLOYMENT HEALTH (Proxy for ADP Weekly)
-    # Series: Initial Claims (ICSA) - The #1 Weekly Labor Metric
-    # Logic: LOWER claims = Bullish USD
-    us_claims = get_latest('ICSA')
+    # B. INFLATION (CPI YoY)
+    us_cpi_val = get_yoy_growth('CPIAUCSL')
+    eu_cpi_val = get_yoy_growth('CP0000EZ19M086NEST')
 
-    # 3. AVERAGE HOURLY EARNINGS m/m
-    # Series: Avg Hourly Earnings of All Employees, Total Private (CES0500000003)
-    us_earnings_mom = get_mom_change('CES0500000003')
+    # C. GDP GROWTH (Real GDP YoY)
+    us_gdp_val = get_yoy_growth('GDPC1', is_quarterly=True)
+    eu_gdp_val = get_yoy_growth('CLVMNACSCAB1GQEA19', is_quarterly=True)
 
-    # 4. CORE RETAIL SALES m/m
-    # Series: Advance Retail Sales: Excl. Motor Vehicle & Parts (RSXFS)
-    us_retail_mom = get_mom_change('RSXFS')
+    # D. UNEMPLOYMENT RATE
+    us_unemp, _ = get_latest('UNRATE')
+    eu_unemp, _ = get_latest('LRHUTTTTEZM156S') 
 
-    # 5. NON-FARM EMPLOYMENT CHANGE (NFP)
-    # Series: All Employees, Total Nonfarm (PAYEMS) -> We calculate the 'Change'
-    us_nfp_change = get_change_value('PAYEMS') # Returns eg. 150 (thousands)
+    # E. MANUFACTURING (Industrial Production)
+    us_manuf = get_yoy_growth('INDPRO')
+    eu_manuf = get_yoy_growth('PRMNTO01EZQ661S') 
 
-    # 6. UNEMPLOYMENT RATE
-    # Series: Unemployment Rate (UNRATE)
-    us_unemp = get_latest('UNRATE')
-
-    # 7. US MANUFACTURING HEALTH (Proxy for Flash PMI)
-    # Series: Industrial Production: Manufacturing (IPMAN)
-    us_manuf_mom = get_mom_change('IPMAN')
+    # F. MARKET EXPECTATIONS (The Predictor)
+    # We use US 2-Year Treasury Yield (DGS2) vs Fed Funds Rate
+    us_2y_yield, _ = get_latest('DGS2')
 
 # --- 5. LOGIC & WINNER CALCULATION ---
-def judge_indicator(name, us_val, eu_val=None):
-    """
-    Decides if the data is Bullish for USD or EUR.
-    """
-    if us_val is None: return "No Data"
-
-    # A. Special Logic for Single-Currency Metrics (US Data)
-    if name == "US Jobless Claims":
-        # Lower claims = Strong Economy = Bullish USD
-        if us_val < 220000: return "USD 🇺🇸 (Strong Labor)"
-        elif us_val > 250000: return "EUR 🇪🇺 (Weak USD Labor)"
-        else: return "Neutral"
-
-    if name == "US NFP Change":
-        # More jobs = Bullish USD
-        if us_val > 150: return "USD 🇺🇸 (Booming Jobs)"
-        elif us_val < 100: return "EUR 🇪🇺 (Weak Hiring)"
-        else: return "Neutral"
-        
-    if name == "US Earnings":
-        # Higher earnings = Inflation fear = Fed Hikes = Bullish USD
-        if us_val > 0.3: return "USD 🇺🇸 (Inflation Risk)"
-        else: return "Neutral"
-
-    # B. Comparison Logic (US vs Germany/EU)
-    if name == "Manufacturing":
-        # Compare US Manuf Growth vs German Manuf Growth
-        if eu_val is None: return "No Data"
-        diff = us_val - eu_val
-        if diff > 0.5: return "USD 🇺🇸 (US Factories Stronger)"
-        elif diff < -0.5: return "EUR 🇪🇺 (German Factories Stronger)"
+def judge(us, eu, metric):
+    if us is None or eu is None: return "No Data"
+    diff = us - eu
+    
+    if metric == 'higher_is_better': # Rates, GDP
+        if diff > 0.25: return "USD 🇺🇸"
+        elif diff < -0.25: return "EUR 🇪🇺"
         else: return "Tie ⚪"
+        
+    elif metric == 'lower_is_better': # Unemployment
+        if diff < -0.25: return "USD 🇺🇸" 
+        elif diff > 0.25: return "EUR 🇪🇺" 
+        else: return "Tie ⚪"
+        
+    elif metric == 'inflation': 
+        # High inflation generally forces hikes (Bullish)
+        if diff > 0.5: return "USD 🇺🇸 (Hikes?)"
+        elif diff < -0.5: return "EUR 🇪🇺 (Hikes?)"
+        else: return "Neutral"
 
-    return "Neutral"
+# --- 6. PREDICTOR LOGIC ---
+def predict_fed_move(current_rate, market_yield_2y):
+    if market_yield_2y is None or current_rate is None: return "Unknown"
+    
+    spread = market_yield_2y - current_rate
+    
+    if spread < -0.50:
+        return "📉 Market expects AGGRESSIVE CUTS (Bearish USD)"
+    elif spread < -0.10:
+        return "↘️ Market expects Small Cuts"
+    elif spread > 0.10:
+        return "↗️ Market expects RATE HIKES (Bullish USD)"
+    else:
+        return "➡️ Market expects PAUSE (Rates Hold)"
 
-# --- 6. DISPLAY DASHBOARD ---
-st.title("🇪🇺 EUR/USD: Advanced Economic Calendar Dashboard")
-st.markdown("### 📊 Live Fundamental Indicators (Auto-Updated)")
+prediction = predict_fed_move(us_rate, us_2y_yield)
 
-# We build the data row by row
-data = [
-    {
-        "Indicator": "1. German Manufacturing (Proxy)",
-        "Value (Latest)": f"{ger_manuf:.2f}% (MoM)" if ger_manuf else "No Data",
-        "Bias Impact": judge_indicator("Manufacturing", us_manuf_mom, ger_manuf)
-    },
-    {
-        "Indicator": "2. US Weekly Jobless Claims (Proxy for ADP)",
-        "Value (Latest)": f"{int(us_claims):,} Claims",
-        "Bias Impact": judge_indicator("US Jobless Claims", us_claims)
-    },
-    {
-        "Indicator": "3. US Avg Hourly Earnings (m/m)",
-        "Value (Latest)": f"{us_earnings_mom:.2f}%",
-        "Bias Impact": judge_indicator("US Earnings", us_earnings_mom)
-    },
-    {
-        "Indicator": "4. US Core Retail Sales (m/m)",
-        "Value (Latest)": f"{us_retail_mom:.2f}%",
-        "Bias Impact": "USD 🇺🇸 (Strong Consumer)" if us_retail_mom and us_retail_mom > 0.3 else "Neutral"
-    },
-    {
-        "Indicator": "5. US Non-Farm Payrolls (Change)",
-        "Value (Latest)": f"+{int(us_nfp_change)}k Jobs",
-        "Bias Impact": judge_indicator("US NFP Change", us_nfp_change)
-    },
-    {
-        "Indicator": "6. US Unemployment Rate",
-        "Value (Latest)": f"{us_unemp:.1f}%",
-        "Bias Impact": "EUR 🇪🇺 (Bearish USD)" if us_unemp > 4.2 else "USD 🇺🇸 (Bullish)"
-    },
-    {
-        "Indicator": "7. US Manufacturing (Proxy)",
-        "Value (Latest)": f"{us_manuf_mom:.2f}% (MoM)",
-        "Bias Impact": judge_indicator("Manufacturing", us_manuf_mom, ger_manuf)
-    }
-]
+# --- 7. DISPLAY WEBSITE ---
+st.title("🇪🇺 EUR/USD Fundamental Command Center")
+st.markdown("### 📊 Macro Economic Cheat Sheet")
+
+# Create DataFrame
+data = {
+    "Indicator": [
+        "Interest Rates (Daily Target)", 
+        "Inflation (CPI YoY)", 
+        "GDP Growth (Real YoY)", 
+        "Unemployment Rate", 
+        "Manufacturing Health"
+    ],
+    "🇺🇸 United States (USD)": [
+        f"{us_rate:.2f}%", 
+        f"{us_cpi_val:.2f}%", 
+        f"{us_gdp_val:.2f}%", 
+        f"{us_unemp:.1f}%", 
+        f"{us_manuf:.1f}%"
+    ],
+    "🇪🇺 Eurozone (EUR)": [
+        f"{eu_rate:.2f}%", 
+        f"{eu_cpi_val:.2f}%", 
+        f"{eu_gdp_val:.2f}%", 
+        f"{eu_unemp:.1f}%", 
+        f"{eu_manuf:.1f}%"
+    ],
+    "Bias / Winner": [
+        judge(us_rate, eu_rate, 'higher_is_better'),
+        judge(us_cpi_val, eu_cpi_val, 'inflation'),
+        judge(us_gdp_val, eu_gdp_val, 'higher_is_better'),
+        judge(us_unemp, eu_unemp, 'lower_is_better'),
+        judge(us_manuf, eu_manuf, 'higher_is_better')
+    ]
+}
 
 df = pd.DataFrame(data)
 st.table(df)
 
-# --- 7. AUTOMATIC CONCLUSION ---
-usd_score = df['Bias Impact'].str.contains("USD").sum()
-eur_score = df['Bias Impact'].str.contains("EUR").sum()
+# --- 8. PREDICTION SECTION ---
+st.divider()
+st.subheader("🔮 Future Rate Predictor (FedWatch Proxy)")
+
+col1, col2, col3 = st.columns(3)
+col1.metric(label="Current Fed Rate", value=f"{us_rate:.2f}%")
+col2.metric(label="US 2-Year Treasury Yield", value=f"{us_2y_yield:.2f}%")
+col3.metric(label="Spread (Yield - Rate)", value=f"{(us_2y_yield - us_rate):.2f}%")
+
+st.info(f"**Prediction Model:** {prediction}")
+st.caption("Logic: If the 2-Year Yield is significantly lower than the Fed Rate, the smart money is betting on Rate Cuts.")
+
+# --- 9. FINAL VERDICT ---
+usd_wins = df['Bias / Winner'].str.contains("USD").sum()
+eur_wins = df['Bias / Winner'].str.contains("EUR").sum()
 
 st.divider()
-st.subheader("🤖 Algorithmic Forecast")
-
-if usd_score > eur_score:
-    st.error(f"### 📉 VERDICT: BEARISH EUR/USD (Score: {usd_score} vs {eur_score})")
-    st.write("US Data is currently overpowering European Data. Favor **Short** positions.")
-elif eur_score > usd_score:
-    st.success(f"### 📈 VERDICT: BULLISH EUR/USD (Score: {eur_score} vs {usd_score})")
-    st.write("Weak US Data or Strong German Data is lifting the Euro. Favor **Long** positions.")
+if usd_wins > eur_wins:
+    st.error(f"### 🐻 BEARISH BIAS for EUR/USD (Score: USD {usd_wins} - {eur_wins} EUR)")
+elif eur_wins > usd_wins:
+    st.success(f"### 🐮 BULLISH BIAS for EUR/USD (Score: EUR {eur_wins} - {usd_wins} USD)")
 else:
-    st.warning("### ⚖️ VERDICT: NEUTRAL / MIXED")
-    st.write("Data is conflicting. Volatility expected but no clear trend.")
+    st.warning("### ⚖️ NEUTRAL BIAS (Market is Balanced)")
 
-if st.button("🔄 Refresh Data"):
+if st.button("Refresh Data"):
     st.rerun()
