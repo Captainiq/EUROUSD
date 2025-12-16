@@ -76,10 +76,9 @@ with st.spinner('Fetching live economic data...'):
     us_manuf_mom = get_mom_change('IPMAN')
 
 # --- 5. LOGIC & WINNER CALCULATION ---
-def judge_indicator(name, us_val, eu_val=None, trend="high_bullish"):
+def judge_indicator(name, us_val, eu_val=None):
     """
     Decides if the data is Bullish for USD or EUR.
-    trend: 'high_bullish' (Higher is good for currency), 'low_bullish' (Lower is good)
     """
     if us_val is None: return "No Data"
 
@@ -104,6 +103,7 @@ def judge_indicator(name, us_val, eu_val=None, trend="high_bullish"):
     # B. Comparison Logic (US vs Germany/EU)
     if name == "Manufacturing":
         # Compare US Manuf Growth vs German Manuf Growth
+        if eu_val is None: return "No Data"
         diff = us_val - eu_val
         if diff > 0.5: return "USD 🇺🇸 (US Factories Stronger)"
         elif diff < -0.5: return "EUR 🇪🇺 (German Factories Stronger)"
