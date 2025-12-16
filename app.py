@@ -50,7 +50,9 @@ with st.spinner('Fetching Macro Data, Sentiment & News...'):
     us_manuf_mom = get_mom_change('IPMAN')
     
     # ... (Interest Rates for Header) ...
-    us_rate = get_latest('DFEDTARU') or 3.75    eu_rate = get_latest('ECBDFR') or 2.00
+    # FIX IS HERE: Removed the unpacking ", _"
+    us_rate = get_latest('DFEDTARU') or 3.75 
+    eu_rate = get_latest('ECBDFR') or 2.00
 
     # ... (NEW: Sentiment Indicators) ...
     # 1. VIX (Fear Index) - VIXCLS
@@ -178,4 +180,5 @@ else:
 
 if st.button("🔄 Refresh Data"):
     st.rerun()
+
 
